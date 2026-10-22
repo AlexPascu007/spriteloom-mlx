@@ -5,14 +5,18 @@ import pathlib
 import shutil
 import sys
 
+from launcher.paths import app_root
+
 FOLDER = "spriteloom"
 PORT_FILE = "server.json"
 
 
 def source_dir() -> pathlib.Path:
-    # frozen: the plugin sits next to the exe; in the repo it is plugin/
+    # The frozen app lives in a .app bundle, while the plugin stays beside the
+    # bundle with the server and venv.  app_root() also preserves the Windows
+    # layout where the exe and plugin are direct siblings.
     if getattr(sys, "frozen", False):
-        return pathlib.Path(sys.executable).parent / "plugin"
+        return app_root() / "plugin"
     return pathlib.Path(__file__).resolve().parent.parent / "plugin"
 
 

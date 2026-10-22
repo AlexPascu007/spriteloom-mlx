@@ -95,3 +95,13 @@ def test_resolve_prefers_existing_venv_interpreter(tmp_path):
     got = paths.resolve({"root": str(tmp_path)}, run=run)
     assert got.python == python
     assert got.python_version == (3, 12, 8)
+
+
+def test_frozen_macos_app_root_is_the_project_parent(tmp_path, monkeypatch):
+    executable = (tmp_path / "Spriteloom.app" / "Contents" / "MacOS" /
+                  "Spriteloom")
+    executable.parent.mkdir(parents=True)
+    monkeypatch.setattr(paths.sys, "platform", "darwin")
+    monkeypatch.setattr(paths.sys, "executable", str(executable))
+    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
+    assert paths.app_root() == tmp_path

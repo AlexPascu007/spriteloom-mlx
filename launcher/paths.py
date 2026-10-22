@@ -38,7 +38,15 @@ def _python_candidates() -> list[list[str]]:
 
 def app_root() -> pathlib.Path:
     if getattr(sys, "frozen", False):
-        return pathlib.Path(sys.executable).parent
+        executable = pathlib.Path(sys.executable)
+        if sys.platform == "darwin":
+            # A PyInstaller app runs from
+            # ``<root>/Spriteloom.app/Contents/MacOS/Spriteloom``.  The
+            # model, venv, server, and plugin remain beside the app bundle.
+            for ancestor in executable.parents:
+                if ancestor.suffix == ".app":
+                    return ancestor.parent
+        return executable.parent
     return pathlib.Path(__file__).resolve().parent.parent
 
 

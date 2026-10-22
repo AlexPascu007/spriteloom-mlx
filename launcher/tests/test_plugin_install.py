@@ -85,3 +85,13 @@ def test_macos_extensions_dir_uses_application_support(tmp_path, monkeypatch):
     folder = tmp_path / "Library" / "Application Support" / "Aseprite"
     folder.mkdir(parents=True)
     assert plugin_install.extensions_dir() == folder / "extensions" / "spriteloom"
+
+
+def test_frozen_macos_plugin_source_stays_beside_app(tmp_path, monkeypatch):
+    executable = (tmp_path / "Spriteloom.app" / "Contents" / "MacOS" /
+                  "Spriteloom")
+    executable.parent.mkdir(parents=True)
+    monkeypatch.setattr(plugin_install.sys, "platform", "darwin")
+    monkeypatch.setattr(plugin_install.sys, "executable", str(executable))
+    monkeypatch.setattr(plugin_install.sys, "frozen", True, raising=False)
+    assert plugin_install.source_dir() == tmp_path / "plugin"

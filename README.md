@@ -152,6 +152,13 @@ To build the exe yourself from a full clone of this repository:
 straight into the project root as `Spriteloom.exe`, about 15 MB: the model
 and PyTorch stay outside it.
 
+On Apple silicon, install PyInstaller in the macOS environment with
+`uv pip install --python .venv/bin/python pyinstaller`, then run
+`./build-macos.sh`. It writes `Spriteloom.app` into the project root. The
+bundle contains the launcher, Cocoa webview, and UI only; `.venv`, `server/`,
+`plugin/`, and `models/` stay beside it. The local build uses PyInstaller's
+ad-hoc signature and is not a signed distribution build.
+
 ### macOS Apple silicon
 
 The macOS path uses the regular Python launcher with a local `.venv`. It uses
@@ -299,6 +306,7 @@ Layout and ghosting still need a real Aseprite.
 | `setup-macos.sh` | creates the macOS environment and downloads the model |
 | `start-server.sh` | starts the macOS server from `.venv/bin/python` |
 | `install-plugin.sh` | installs the plugin into the macOS Aseprite folder |
+| `build-macos.spec`, `build-macos.sh` | builds the local arm64 `.app` bundle |
 
 The launcher owns the settings file `%APPDATA%\Spriteloom\config.json` on
 Windows and `~/Library/Application Support/Spriteloom/config.json` on macOS.
