@@ -21,12 +21,27 @@ def dest_in(aseprite_dir) -> pathlib.Path:
     return pathlib.Path(aseprite_dir) / "extensions" / FOLDER
 
 
+def user_config_dir() -> pathlib.Path | None:
+    """Return Aseprite's per-user folder on the current platform."""
+    override = os.environ.get("ASEPRITE_USER_FOLDER")
+    if override:
+        return pathlib.Path(override)
+    if sys.platform == "darwin":
+        base = os.environ.get("APPDATA")
+        return ((pathlib.Path(base) / "Aseprite") if base else
+                pathlib.Path.home() / "Library" / "Application Support" /
+                "Aseprite")
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA")
+        return pathlib.Path(base) / "Aseprite" if base else None
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = pathlib.Path(base) if base else pathlib.Path.home() / ".config"
+    return root / "aseprite"
+
+
 def extensions_dir() -> pathlib.Path | None:
-    base = os.environ.get("APPDATA")
-    if not base:
-        return None
-    aseprite = pathlib.Path(base) / "Aseprite"
-    if not aseprite.is_dir():
+    aseprite = user_config_dir()
+    if not aseprite or not aseprite.is_dir():
         return None
     return dest_in(aseprite)
 

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import pathlib
 import socket
 import subprocess
@@ -112,6 +113,18 @@ def test_venv_python_missing(tmp_path):
     assert server_proc.venv_python(tmp_path) is None
 
 
+def test_venv_python_finds_macos_layout(tmp_path):
+    python = tmp_path / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    assert server_proc.venv_python(tmp_path) == python
+
+
+def test_non_windows_processes_start_in_a_new_session(monkeypatch):
+    monkeypatch.setattr(server_proc.sys, "platform", "darwin")
+    assert server_proc.popen_options()["start_new_session"] is True
+
+
 def test_port_is_free_on_unused_port():
     assert server_proc.port_is_free(free_port())
 
@@ -194,9 +207,15 @@ def test_stop_kills_process(tmp_path):
 
 
 def pid_alive(pid):
-    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                         capture_output=True, text=True).stdout
-    return str(pid) in out
+    if sys.platform == "win32":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                             capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
 
 
 # the server spawns workers of its own; stopping must take the whole tree
@@ -241,6 +260,8 @@ FAKE_LAUNCHER = (
 )
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="hard-kill cleanup test uses Task Manager")
 def test_hard_killed_launcher_takes_the_server_with_it(tmp_path):
     root = str(pathlib.Path(__file__).resolve().parent.parent.parent)
     launcher = subprocess.Popen(

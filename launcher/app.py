@@ -1,4 +1,5 @@
 """The launcher window: config, plugin install and server process, glued."""
+import atexit
 import pathlib
 import subprocess
 import sys
@@ -10,9 +11,16 @@ from launcher import paths, plugin_install, server_proc, setup_checks, \
     setup_steps
 from launcher.server_proc import NO_WINDOW
 from launcher.paths import app_root
-from server.config import (HOST, VRAM_MODES, load_port, load_settings,
-                           load_vram_mode, save_port, save_settings,
-                           save_vram_mode)
+from server import config as server_config
+
+HOST = server_config.HOST
+VRAM_MODES = server_config.VRAM_MODES
+load_port = server_config.load_port
+load_settings = server_config.load_settings
+load_vram_mode = server_config.load_vram_mode
+save_port = server_config.save_port
+save_settings = server_config.save_settings
+save_vram_mode = server_config.save_vram_mode
 
 VERSION = "1.0.0"
 TITLE = "Spriteloom"
@@ -31,7 +39,7 @@ MIN_HEIGHT = 240
 MIN_SIZE = (NARROW, MIN_HEIGHT)
 SERVER_NEEDS = ("venv", "deps", "torch", "model")
 SERVER_NEEDS_LABELS = {"venv": "virtual env", "deps": "dependencies",
-                       "torch": "PyTorch", "model": "model"}
+                       "torch": "backend", "model": "model"}
 MAX_SCREEN_FRACTION = 0.9
 POLL_SECONDS = 1.5
 OFFLINE = {"state": "offline", "progress": 0.0, "stage": None}
@@ -78,7 +86,6 @@ class Api:
     def __init__(self, root: pathlib.Path | None = None):
         self.root = pathlib.Path(root) if root else app_root()
         self.port = load_port()
-        self.proc = self._new_proc()
         self.health = dict(OFFLINE)
         self.stopped_by_user = False
         self.hint = ""
@@ -86,6 +93,9 @@ class Api:
         self.height = HEIGHT_COMPACT
         self.width = NARROW
         self.paths = paths.resolve()
+        if root is None:
+            self.root = self.paths.root
+        self.proc = self._new_proc()
         self.items: list[dict] = []
         self.checking = False
         self.setup_log: list[str] = []
@@ -142,16 +152,25 @@ class Api:
 
     def open_url(self, url: str) -> None:
         # webbrowser.open() is flaky from pywebview's JS-API thread
-        if str(url).startswith(("http://", "https://")):
+        if str(url).lower().startswith(("http://", "https://")):
             try:
-                subprocess.run(["explorer", str(url)], creationflags=NO_WINDOW)
+                opener = ("open" if sys.platform == "darwin" else
+                          "xdg-open" if sys.platform != "win32" else
+                          "explorer")
+                subprocess.run([opener, str(url)], creationflags=NO_WINDOW,
+                               check=False)
             except (OSError, subprocess.SubprocessError):
                 pass
 
     def copy_to_clipboard(self, text: str) -> bool:
-        # clip.exe, not navigator.clipboard: that one skips Win+V history
+        # Use the native clipboard utility so the text is available outside
+        # the embedded webview as well as inside it.
+        command = ("pbcopy" if sys.platform == "darwin" else
+                   "xclip" if sys.platform != "win32" else "clip")
         try:
-            subprocess.run(["clip"], input=str(text), text=True, check=True,
+            args = ([command, "-selection", "clipboard"]
+                    if command == "xclip" else [command])
+            subprocess.run(args, input=str(text), text=True, check=True,
                            creationflags=NO_WINDOW)
             return True
         except (OSError, subprocess.SubprocessError):
@@ -198,6 +217,22 @@ class Api:
             self._say("")
         return self._snapshot()
 
+    def set_mlx_quantize(self, mode) -> dict:
+        saver = getattr(server_config, "save_mlx_quantize", None)
+        if saver:
+            saver(mode)
+        else:
+            # The server config stores the MFLUX quantization as an integer
+            # (8 by default).  save_settings is also compatible with older
+            # checkouts that do not expose a dedicated saver.
+            try:
+                value = None if mode is None else int(mode)
+            except (TypeError, ValueError):
+                return self._snapshot()
+            if value is None or value in (3, 4, 5, 6, 8):
+                save_settings({"mlx_quantize": value})
+        return self._snapshot()
+
     # ---- setup wizard
 
     def _setup_log(self, line: str, replace: bool = False) -> None:
@@ -212,7 +247,7 @@ class Api:
         self.step_state[step_id] = (state, detail)
 
     def _start_check(self) -> None:
-        # deps and torch probes import torch, seconds each; keep it off the UI
+        # Dependency and backend probes can take seconds; keep them off the UI.
         if self.checking:
             return
         self.checking = True
@@ -255,7 +290,16 @@ class Api:
         return {"items": rows, "paths": self._paths_view(), "running": running,
                 "checking": self.checking, "cold": cold,
                 "overrides": overrides, "vram_mode": load_vram_mode(),
+                "backend": setup_checks.backend_name(),
+                "mlx_quantize": self._mlx_quantize(),
                 "log": "\n".join(self.setup_log[-200:])}
+
+    @staticmethod
+    def _mlx_quantize():
+        loader = getattr(server_config, "load_mlx_quantize", None)
+        if loader:
+            return loader()
+        return 8
 
     def _paths_view(self) -> dict:
         p = self.paths
@@ -298,11 +342,14 @@ class Api:
             return
         p = pathlib.Path(path)
         try:
-            if p.is_dir():
-                subprocess.run(["explorer", str(p)], creationflags=NO_WINDOW)
+            if sys.platform == "darwin":
+                args = ["open", str(p)] if p.is_dir() else ["open", "-R", str(p)]
+            elif sys.platform == "win32":
+                args = (["explorer", str(p)] if p.is_dir()
+                        else ["explorer", "/select,", str(p)])
             else:
-                subprocess.run(["explorer", "/select,", str(p)],
-                               creationflags=NO_WINDOW)
+                args = ["xdg-open", str(p.parent if p.is_file() else p)]
+            subprocess.run(args, creationflags=NO_WINDOW, check=False)
         except (OSError, subprocess.SubprocessError):
             pass
 
@@ -317,7 +364,9 @@ class Api:
     def install_plugin(self) -> dict:
         dest = plugin_install.extensions_dir()
         if dest is None:
-            self._say("No Aseprite found in %APPDATA%. Is it installed?",
+            folder = ("~/Library/Application Support/Aseprite" if
+                      sys.platform == "darwin" else "%APPDATA%\\Aseprite")
+            self._say(f"No Aseprite found in {folder}. Is it installed?",
                       bad=True)
             return self._snapshot()
         try:
@@ -373,8 +422,9 @@ class Api:
         hint = self.hint
         if not_ready:
             state = {it["id"]: it["state"] for it in self.items}
-            missing = [SERVER_NEEDS_LABELS[k] for k in SERVER_NEEDS
-                      if state.get(k) != setup_checks.OK]
+            labels = {item["id"]: item["label"] for item in self.items}
+            missing = [labels.get(k, SERVER_NEEDS_LABELS[k])
+                       for k in SERVER_NEEDS if state.get(k) != setup_checks.OK]
             listed = (missing[0] if len(missing) < 2 else
                      ", ".join(missing[:-1]) + " and " + missing[-1])
             hint = f"Install {listed} to start."
@@ -391,6 +441,8 @@ class Api:
             "hint": hint,
             "hint_bad": hint_bad,
             "vram_mode": load_vram_mode(),
+            "backend": setup_checks.backend_name(),
+            "mlx_quantize": self._mlx_quantize(),
             "plugin_text": text,
             "plugin_warn": warn,
             "plugin_action": action,
@@ -407,7 +459,12 @@ def main() -> None:
                                    background_color="#14161c")
     _window = window
 
-    window.events.closing += lambda: api.proc.stop()
+    def shutdown(*_args):
+        api.runner.cancel()
+        api.proc.stop()
+
+    window.events.closing += shutdown
+    atexit.register(shutdown)
 
     if not webview2_present():
         window.load_html(

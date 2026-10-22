@@ -2,6 +2,8 @@
 import os
 import pathlib
 import shutil
+import platform
+import sys
 
 from launcher import plugin_install
 from launcher.paths import MIN_PYTHON, run_command
@@ -15,12 +17,58 @@ MODEL_FOLDER = "models--black-forest-labs--FLUX.2-klein-4B"
 # a snapshot dir appears from the first file downloaded, long before it's done
 MODEL_MARKER = ".complete"
 MODEL_GB = 15
-# metadata only, not a real import -- importing torch/diffusers costs seconds
-DEPS_PROBE = ("import importlib.metadata as m; "
-              "[m.version(d) for d in ('websockets','diffusers','transformers',"
-              "'accelerate','peft','bitsandbytes','Pillow','numpy',"
-              "'scipy')]; print('ok')")
+# Dependency metadata is checked without importing the heavyweight server.
+_COMMON_DEPS = ("'websockets','Pillow','numpy','scipy','safetensors',"
+                "'huggingface-hub','tqdm'")
+_WINDOWS_DEPS = ("'diffusers','transformers','accelerate','peft',"
+                 "'bitsandbytes'")
+_MACOS_DEPS = "'mlx','mflux'"
 TORCH_PROBE = "import importlib.metadata as m; print(m.version('torch'))"
+MLX_PROBE = "import mlx; print(getattr(mlx, '__version__', 'installed'))"
+
+
+def backend_name(requested: str | None = None, system: str | None = None,
+                 machine: str | None = None) -> str:
+    """Resolve the setup backend using the same automatic platform rule.
+
+    The server owns the persisted backend setting.  Import it when that API
+    exists, while retaining compatibility with the pre-MLX configuration in
+    existing Windows checkouts.
+    """
+    if requested is None:
+        try:
+            from server import config
+            loader = getattr(config, "load_backend", None)
+            requested = loader() if loader else "auto"
+        except (ImportError, OSError, TypeError, ValueError):
+            requested = "auto"
+    requested = str(requested or "auto").lower()
+    if requested in ("mlx", "cuda"):
+        return requested
+    system = system or sys.platform
+    machine = machine or platform.machine()
+    if system == "darwin" and machine.lower() in ("arm64", "aarch64"):
+        return "mlx"
+    return "cuda"
+
+
+def backend_label(backend: str | None = None) -> str:
+    return "MLX" if (backend or backend_name()) == "mlx" \
+        else "PyTorch with CUDA"
+
+
+def deps_probe(backend: str | None = None) -> str:
+    """Build a metadata-only dependency probe for the active backend."""
+    backend = backend or backend_name()
+    deps = _MACOS_DEPS if backend == "mlx" else _WINDOWS_DEPS
+    return ("import importlib.metadata as m; "
+            f"[m.version(d) for d in ({_COMMON_DEPS},{deps})]; "
+            "print('ok')")
+
+
+# Kept as a public compatibility constant for callers that used the old
+# Windows-only dependency probe.  Its package list follows the active backend.
+DEPS_PROBE = deps_probe()
 
 
 def _cuda_tag(version):
@@ -69,6 +117,8 @@ def _model_item(paths) -> dict:
 
 
 def shortcut_path() -> pathlib.Path | None:
+    if sys.platform == "darwin":
+        return None
     base = os.environ.get("APPDATA")
     return (pathlib.Path(base) / "Microsoft" / "Windows" / "Start Menu"
             / "Programs" / "Spriteloom.lnk") if base else None
@@ -92,6 +142,8 @@ def refresh_live(items: list[dict], paths) -> list[dict]:
 def check_all(paths, run=None) -> list[dict]:
     runner = run or run_command
     items = []
+    backend = backend_name()
+    label = backend_label(backend)
 
     version = paths.python_version
     if paths.python and (version is None or version >= MIN_PYTHON):
@@ -112,23 +164,26 @@ def check_all(paths, run=None) -> list[dict]:
                            needs=["python"]))
 
     if not interpreter:
-        items.append(_item("torch", "PyTorch with CUDA", MISSING,
+        items.append(_item("torch", label, MISSING,
                            "needs the environment", needs=["venv"]))
         items.append(_item("deps", "Server dependencies", MISSING,
                            "needs the environment", needs=["venv", "torch"]))
     else:
-        got = runner([str(interpreter), "-c", TORCH_PROBE])
+        probe = MLX_PROBE if backend == "mlx" else TORCH_PROBE
+        got = runner([str(interpreter), "-c", probe])
         cuda = _cuda_tag(got)
-        if cuda:
-            items.append(_item("torch", "PyTorch with CUDA", OK,
+        if backend == "mlx" and got:
+            items.append(_item("torch", label, OK,
+                               f"MLX {got}", needs=["venv"]))
+        elif backend == "cuda" and cuda:
+            items.append(_item("torch", label, OK,
                                f"CUDA {cuda}", needs=["venv"]))
         else:
-            detail = "no CUDA" if got else "missing"
-            items.append(_item("torch", "PyTorch with CUDA", MISSING, detail,
+            detail = "missing MLX" if backend == "mlx" and not got else \
+                ("no CUDA" if got else "missing")
+            items.append(_item("torch", label, MISSING, detail,
                                needs=["venv"]))
-        got = runner([str(interpreter), "-c", DEPS_PROBE])
-        # deps alone would let bitsandbytes pull a plain CPU torch in; needing
-        # torch here (not just venv) keeps the CUDA build ahead of that pull
+        got = runner([str(interpreter), "-c", deps_probe(backend)])
         items.append(_item("deps", "Server dependencies",
                            OK if got else MISSING,
                            "installed" if got else "missing",
@@ -136,5 +191,8 @@ def check_all(paths, run=None) -> list[dict]:
 
     items.append(_plugin_item(paths))
     items.append(_model_item(paths))
-    items.append(_shortcut_item(paths))
+    # There is no Start Menu on macOS.  Omitting this optional row also keeps
+    # it out of the setup selection closure.
+    if sys.platform != "darwin":
+        items.append(_shortcut_item(paths))
     return items

@@ -2,11 +2,14 @@
 import pathlib
 import re
 import subprocess
+import sys
 import threading
 
 from launcher import plugin_install, setup_checks
 from launcher.server_proc import (NO_WINDOW, assign_to_job, clean_line,
-                                  close_job, make_kill_on_close_job)
+                                  close_job, make_kill_on_close_job,
+                                  popen_options, terminate_process,
+                                  venv_python)
 
 # torch before deps: bitsandbytes pulls torch>=2.3,<3 on its own, and if
 # nothing satisfies that yet, pip installs a plain CPU build here that the
@@ -20,6 +23,7 @@ LABELS = {"venv": "Creating virtual environment",
           "shortcut": "Creating a Start Menu shortcut"}
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 MODEL_ID = "black-forest-labs/FLUX.2-klein-4B"
+MFLUX_COMMIT = "0fea52bada4ade619f1cdb7ae26087b32d87dd89"
 _PROGRESS_RE = re.compile(r"^Progress (\d+) of (\d+)$")
 
 
@@ -40,12 +44,18 @@ def plan(selected) -> list[str]:
 
 
 def venv_interpreter(paths) -> pathlib.Path:
-    return paths.root / ".venv" / "Scripts" / "python.exe"
+    found = venv_python(paths.root)
+    if found:
+        return found
+    folder = paths.root / ".venv"
+    return (folder / "Scripts" / "python.exe" if sys.platform == "win32"
+            else folder / "bin" / "python")
 
 
 def command(step_id: str, paths) -> list[str] | None:
     if step_id == "venv":
         # python -m venv prints nothing at all; stage the silent ~8s of it
+        root = repr(str(paths.root / ".venv"))
         code = (
             "import venv\n"
             "class _V(venv.EnvBuilder):\n"
@@ -58,17 +68,22 @@ def command(step_id: str, paths) -> list[str] | None:
             "    def setup_scripts(self, context):\n"
             "        print('Finishing up...', flush=True)\n"
             "        super().setup_scripts(context)\n"
-            f"_V(with_pip=True).create(r'{paths.root / '.venv'}')\n"
+            f"_V(with_pip=True).create({root})\n"
         )
-        return [str(paths.python), "-u", "-c", code]
+        return [str(paths.python or sys.executable), "-u", "-c", code]
     interpreter = str(venv_interpreter(paths))
     if step_id == "deps":
         # --no-compile: python byte-compiles on first import anyway, lazily;
         # pip's own compileall pass otherwise costs ~30s on a package this size
+        requirements = ("requirements-macos.txt" if sys.platform == "darwin"
+                        else "requirements.txt")
         return [interpreter, "-m", "pip", "install", "--progress-bar", "raw",
                 "--no-compile", "-r",
-                str(paths.root / "server" / "requirements.txt")]
+                str(paths.root / "server" / requirements)]
     if step_id == "torch":
+        if sys.platform == "darwin":
+            return [interpreter, "-m", "pip", "install", "--progress-bar",
+                    "raw", "--no-compile", "--upgrade", "mlx"]
         # bare "torch" reads as satisfied by any installed build, CPU included
         return [interpreter, "-m", "pip", "install", "--progress-bar", "raw",
                 "--no-compile", "--upgrade", "torch",
@@ -76,6 +91,7 @@ def command(step_id: str, paths) -> list[str] | None:
     if step_id == "model":
         # byte-total bar (not file count); Xet's progress lags real transfer,
         # so it's disabled; the repo's standalone ~8 GB checkpoint is unused
+        models_dir = repr(str(paths.models_dir))
         code = (
             "import os\n"
             "os.environ['HF_HUB_DISABLE_XET'] = '1'\n"
@@ -93,11 +109,12 @@ def command(step_id: str, paths) -> list[str] | None:
             "        if line != _P._last:\n"
             "            print(line, flush=True)\n"
             "            _P._last = line\n"
-            f"snapshot_download({MODEL_ID!r}, cache_dir=r'{paths.models_dir}', "
+            f"snapshot_download({MODEL_ID!r}, cache_dir={models_dir}, "
+            "local_files_only=False, "
             "ignore_patterns=['flux-2-klein-4b.safetensors'], tqdm_class=_P)\n"
             "import pathlib\n"
             # marker written only once the download actually finishes
-            f"(pathlib.Path(r'{paths.models_dir}') / {setup_checks.MODEL_FOLDER!r} / "
+            f"(pathlib.Path({models_dir}) / {setup_checks.MODEL_FOLDER!r} / "
             f"{setup_checks.MODEL_MARKER!r}).write_text('ok')\n"
         )
         return [interpreter, "-u", "-c", code]
@@ -132,6 +149,7 @@ class Runner:
 
     def cancel(self) -> None:
         self.cancelled = True
+        terminate_process(self.proc)
         job, self.job = self.job, None
         close_job(job)
 
@@ -144,7 +162,9 @@ class Runner:
             if halted:
                 self.on_event(step, "skipped", "a previous step failed")
                 continue
-            self.on_log(f"===== {LABELS[step]} =====")
+            label = ("Installing MLX" if step == "torch" and
+                     setup_checks.backend_name() == "mlx" else LABELS[step])
+            self.on_log(f"===== {label} =====")
             self.on_event(step, "running", "")
             ok = self._one(step)
             if self.cancelled:
@@ -180,6 +200,9 @@ class Runner:
         return True
 
     def _shortcut(self) -> bool:
+        if sys.platform == "darwin":
+            self.on_log("Start Menu shortcut is not used on macOS")
+            return True
         exe = self.paths.root / "Spriteloom.exe"
         lnk = setup_checks.shortcut_path()
         if not exe.is_file() or not lnk:
@@ -213,7 +236,7 @@ class Runner:
             self.proc = subprocess.Popen(
                 cmd, cwd=str(self.paths.root), stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                errors="replace", creationflags=NO_WINDOW)
+                errors="replace", **popen_options())
         except OSError as e:
             self.on_log(f"could not start: {e}")
             return False
@@ -222,6 +245,7 @@ class Runner:
         assign_to_job(self.job, self.proc.pid)
         # cancel may have fired before the job existed; catch that here
         if self.cancelled:
+            terminate_process(self.proc)
             job, self.job = self.job, None
             close_job(job)
             return False

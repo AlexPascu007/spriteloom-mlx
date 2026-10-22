@@ -2,6 +2,8 @@ import pathlib
 import sys
 import threading
 
+import pytest
+
 from launcher import paths, setup_checks, setup_steps
 
 
@@ -33,12 +35,14 @@ def test_venv_command_actually_creates_a_working_venv_with_stages(tmp_path):
                                 on_log=lambda line, replace=False: logs.append(line))
     runner.start(["venv"])
     runner.wait(timeout=60)
-    assert (tmp_path / ".venv" / "Scripts" / "python.exe").exists()
+    assert ((tmp_path / ".venv" / "bin" / "python").exists() or
+            (tmp_path / ".venv" / "Scripts" / "python.exe").exists())
     assert any("Bootstrapping pip" in l for l in logs)
     assert any("Finishing up" in l for l in logs)
 
 
-def test_command_for_torch_uses_the_cuda_index(tmp_path):
+def test_command_for_torch_uses_the_cuda_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_steps.sys, "platform", "win32")
     cmd = setup_steps.command("torch", make_paths(tmp_path))
     assert "--index-url" in cmd
     assert cmd[-1].endswith("cu128")
@@ -123,6 +127,7 @@ def test_command_for_shortcut_is_not_a_subprocess(tmp_path):
 
 
 def test_shortcut_skips_without_the_exe(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_steps.sys, "platform", "win32")
     monkeypatch.setenv("APPDATA", str(tmp_path))
     logs = []
     runner = setup_steps.Runner(make_paths(tmp_path),
@@ -132,7 +137,10 @@ def test_shortcut_skips_without_the_exe(tmp_path, monkeypatch):
     assert any("skipping shortcut" in l for l in logs)
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows shortcut creation needs PowerShell")
 def test_shortcut_creates_a_real_lnk_next_to_the_exe(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_steps.sys, "platform", "win32")
     monkeypatch.setenv("APPDATA", str(tmp_path))
     p = make_paths(tmp_path)
     (p.root / "Spriteloom.exe").write_bytes(b"")
@@ -231,3 +239,24 @@ def test_cancel_stops_the_run(tmp_path):
     assert states["venv"] == "cancelled"
     assert states.get("deps") in ("skipped", "cancelled")
     assert not runner.is_running()
+
+
+def test_macos_uses_bin_python_and_mlx_requirements(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_steps.sys, "platform", "darwin")
+    p = make_paths(tmp_path)
+    deps = setup_steps.command("deps", p)
+    backend = setup_steps.command("torch", p)
+    assert str(tmp_path / ".venv" / "bin" / "python") == deps[0]
+    assert str(tmp_path / "server" / "requirements-macos.txt") in deps
+    assert backend[-1] == "mlx"
+    assert "cu128" not in " ".join(backend)
+
+
+def test_macos_shortcut_step_is_a_successful_noop(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_steps.sys, "platform", "darwin")
+    logs = []
+    runner = setup_steps.Runner(make_paths(tmp_path),
+                                on_event=lambda *a: None,
+                                on_log=lambda line: logs.append(line))
+    assert runner._shortcut() is True
+    assert any("not used on macOS" in line for line in logs)

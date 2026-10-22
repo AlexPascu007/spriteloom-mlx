@@ -69,7 +69,8 @@ def test_deps_missing_when_import_fails(tmp_path):
     assert items["deps"]["state"] == setup_checks.MISSING
 
 
-def test_torch_missing_without_cuda(tmp_path):
+def test_torch_missing_without_cuda(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_checks.sys, "platform", "win32")
     def run(cmd):
         return "2.8.0+cpu" if "torch" in cmd[-1] else "ok"
     items = by_id(setup_checks.check_all(make_paths(tmp_path, venv=True),
@@ -77,7 +78,8 @@ def test_torch_missing_without_cuda(tmp_path):
     assert items["torch"]["state"] == setup_checks.MISSING
 
 
-def test_torch_ok_with_cuda(tmp_path):
+def test_torch_ok_with_cuda(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_checks.sys, "platform", "win32")
     def run(cmd):
         return "2.8.0+cu128" if "torch" in cmd[-1] else "ok"
     items = by_id(setup_checks.check_all(make_paths(tmp_path, venv=True),
@@ -141,6 +143,7 @@ def test_model_is_required(tmp_path):
 
 
 def test_shortcut_missing_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_checks.sys, "platform", "win32")
     monkeypatch.setenv("APPDATA", str(tmp_path))
     items = by_id(setup_checks.check_all(make_paths(tmp_path),
                                          run=lambda cmd: None))
@@ -149,6 +152,7 @@ def test_shortcut_missing_by_default(tmp_path, monkeypatch):
 
 
 def test_shortcut_ok_once_the_lnk_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_checks.sys, "platform", "win32")
     monkeypatch.setenv("APPDATA", str(tmp_path))
     lnk = setup_checks.shortcut_path()
     lnk.parent.mkdir(parents=True)
@@ -156,3 +160,20 @@ def test_shortcut_ok_once_the_lnk_exists(tmp_path, monkeypatch):
     items = by_id(setup_checks.check_all(make_paths(tmp_path),
                                          run=lambda cmd: None))
     assert items["shortcut"]["state"] == setup_checks.OK
+
+
+def test_backend_auto_selects_mlx_on_apple_silicon():
+    assert setup_checks.backend_name("auto", "darwin", "arm64") == "mlx"
+    assert setup_checks.backend_name("auto", "darwin", "x86_64") == "cuda"
+    assert setup_checks.backend_name("mlx", "win32", "AMD64") == "mlx"
+
+
+def test_macos_checks_use_mlx_and_skip_shortcut(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_checks.sys, "platform", "darwin")
+    monkeypatch.setattr(setup_checks.platform, "machine", lambda: "arm64")
+    items = by_id(setup_checks.check_all(
+        make_paths(tmp_path, venv=True), run=lambda cmd: "ok"))
+    assert items["torch"]["label"] == "MLX"
+    assert items["torch"]["state"] == setup_checks.OK
+    assert "bitsandbytes" not in setup_checks.deps_probe("mlx")
+    assert "shortcut" not in items

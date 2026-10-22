@@ -114,6 +114,7 @@ function paint(s) {
   $("install").disabled = busy;
   const setupCls = "ghost" + (s.cold ? " cold" : "");
   if ($("setupbtn").className !== setupCls) $("setupbtn").className = setupCls;
+  $("vramcard").hidden = s.backend === "mlx";
   if (document.activeElement !== $("vram")) $("vram").value = s.vram_mode;
 
   renderLog(s.log);
@@ -220,6 +221,7 @@ function closeOverNeeds(items, base) {
 }
 
 function setupPaint(s) {
+  $("vramcard").hidden = s.backend === "mlx";
   if (document.activeElement !== $("vram")) $("vram").value = s.vram_mode;
   installing = s.running;
 

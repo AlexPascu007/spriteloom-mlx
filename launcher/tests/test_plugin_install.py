@@ -77,3 +77,11 @@ def test_install_overwrites_stale_file(tmp_path):
     (dest / "main.lua").write_text("-- old", encoding="utf-8")
     plugin_install.install(src, dest, 8765)
     assert (dest / "main.lua").read_text(encoding="utf-8") == "-- entry"
+
+
+def test_macos_extensions_dir_uses_application_support(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin_install.sys, "platform", "darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    folder = tmp_path / "Library" / "Application Support" / "Aseprite"
+    folder.mkdir(parents=True)
+    assert plugin_install.extensions_dir() == folder / "extensions" / "spriteloom"

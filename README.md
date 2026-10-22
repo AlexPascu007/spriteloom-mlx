@@ -69,15 +69,16 @@ a lightweight tool:
 
 | | Requirement |
 |---|---|
-| GPU | **NVIDIA, 12+ GB VRAM** (developed on an RTX 5080); 8 GB GPUs work too, in **Legacy 8 GB mode** — see below |
-| RAM | **16 GB minimum.** Legacy 8 GB mode holds the whole ~16 GB model in system RAM, so free RAM plus the Windows page file must comfortably clear that — see below |
-| OS | Windows |
-| Python | 3.11+ |
+| GPU | **NVIDIA, 12+ GB VRAM** on Windows, or **Apple silicon** with MLX on macOS (M1–M5; 32 GB is recommended) |
+| RAM | **16 GB minimum on Windows.** Apple silicon users should have 32 GB for the original model before MLX quantization. |
+| OS | Windows or macOS on Apple silicon |
+| Python | 3.11+; macOS setup prefers Python 3.12 |
 | Aseprite | 1.3+ |
 | Disk | ~15 GB for the model (downloaded during Setup) |
 
-No NVIDIA GPU, no Spriteloom. There is no CPU fallback and no cloud
-option by design — the whole point is that it runs locally.
+There is no CPU fallback and no cloud option by design. On macOS, the server
+selects MLX on arm64 and uses 8-bit quantization by default. On Windows, it
+selects the CUDA backend.
 
 ### VRAM modes
 
@@ -105,7 +106,13 @@ the GPU:
   fails; the server now checks this at startup and prints why instead of
   crashing.
 
+On Apple silicon, the launcher hides the Windows VRAM choices. The MLX
+backend uses 8-bit quantization by default and loads the original BFL model
+files from the downloaded diffusers layout.
+
 ## Install
+
+### Windows
 
 1. Download the latest build from
    [itch.io](https://vkarach.itch.io/spriteloom) and unzip it anywhere. It
@@ -144,6 +151,36 @@ To build the exe yourself from a full clone of this repository:
 `.venv\Scripts\python -m PyInstaller build.spec --distpath .` -- it builds
 straight into the project root as `Spriteloom.exe`, about 15 MB: the model
 and PyTorch stay outside it.
+
+### macOS Apple silicon
+
+The macOS path uses the regular Python launcher with a local `.venv`. It uses
+`uv` at `/opt/homebrew/bin/uv` when available and asks it for Python 3.12.
+Without `uv`, install Python 3.12 and let the script find `python3.12`.
+
+From the project folder, run:
+
+```sh
+chmod +x setup-macos.sh start-server.sh install-plugin.sh
+./setup-macos.sh
+```
+
+The script installs the launcher, MLX, the pinned MFLUX commit
+(`0fea52bada4ade619f1cdb7ae26087b32d87dd89`), and the other server packages.
+It downloads the original
+`black-forest-labs/FLUX.2-klein-4B` snapshot, ignores the standalone
+checkpoint file, and writes `models/models--black-forest-labs--FLUX.2-klein-4B/.complete`
+only after the download finishes. It does not select another model.
+
+Run the launcher with:
+
+```sh
+.venv/bin/python -m launcher.app
+```
+
+`start-server.sh` starts the server directly for diagnostics. The plugin is
+installed under `~/Library/Application Support/Aseprite/extensions/spriteloom`;
+restart Aseprite after setup. macOS has no Start Menu shortcut step.
 
 ## Use
 
@@ -259,32 +296,40 @@ Layout and ghosting still need a real Aseprite.
 | `launcher/setup_checks.py` | what the setup is missing, detection only |
 | `launcher/setup_steps.py` | running the install steps in order |
 | `server/config.py` | the settings, shared by the launcher and the server |
+| `setup-macos.sh` | creates the macOS environment and downloads the model |
+| `start-server.sh` | starts the macOS server from `.venv/bin/python` |
+| `install-plugin.sh` | installs the plugin into the macOS Aseprite folder |
 
-The launcher owns the settings file `%APPDATA%\Spriteloom\config.json`: the
-port, the VRAM mode, and the setup paths all live there, and every write
-merges so one key never erases another. The port defaults to 8765, and
-**Install** stamps it into `server.json` next to the plugin, so both ends
-agree.
+The launcher owns the settings file `%APPDATA%\Spriteloom\config.json` on
+Windows and `~/Library/Application Support/Spriteloom/config.json` on macOS.
+The port, backend settings, and setup paths live there, and every write merges
+so one key never erases another. The port defaults to 8765, and **Install**
+stamps it into `server.json` next to the plugin, so both ends agree.
 
-The server runs inside a Windows job object that dies with the launcher.
-That is what keeps a crashed or killed launcher from leaving a server behind
-holding your VRAM.
+On Windows, the server runs inside a job object that dies with the launcher.
+On macOS, the launcher starts a separate process group and stops the group on
+window close or setup cancellation. This keeps a normal launcher quit from
+leaving a server behind holding memory.
 
 ## Troubleshooting
 
 If the server says it crashed or never finishes loading, run the built-in
 loader check from the install folder:
 
-```
+```text
+# Windows
 .venv\Scripts\python -m server.diagnose
+
+# macOS
+.venv/bin/python -m server.diagnose
 ```
 
 It prints package versions, memory headroom, and whether the model files are
 complete, then loads the transformer on its own. `TRUNCATED` means the
 download was cut short — delete the model folder and re-download via Setup. A
 crash only in the full run, with the isolated load passing, is memory: close
-other apps or raise the Windows page file. The server runs the same file and
-memory checks at startup, so this is mainly for a closer look.
+other apps. On Windows, also raise the page file. The server runs the same
+file and memory checks at startup, so this is mainly for a closer look.
 
 ## License
 

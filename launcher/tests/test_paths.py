@@ -60,3 +60,38 @@ def test_resolve_reports_missing_aseprite(tmp_path, monkeypatch):
     got = paths.resolve({}, run=fake_run({}))
     assert got.aseprite_dir is None
     assert got.python is None
+
+
+def test_macos_prefers_python312(monkeypatch):
+    monkeypatch.setattr(paths.sys, "platform", "darwin")
+    run = fake_run({"python3.12": "/opt/homebrew/bin/python3.12|3.12.8",
+                    "python3": "/opt/homebrew/bin/python3|3.14.0"})
+    assert paths.detect_python(run=run) == (
+        pathlib.Path("/opt/homebrew/bin/python3.12"), (3, 12, 8))
+
+
+def test_macos_uv_python_is_supported(monkeypatch):
+    monkeypatch.setattr(paths.sys, "platform", "darwin")
+    run = fake_run({"/opt/homebrew/bin/uv": "/opt/homebrew/opt/python@3.12/bin/python3.12",
+                    "/opt/homebrew/opt/python@3.12/bin/python3.12":
+                    "/opt/homebrew/opt/python@3.12/bin/python3.12|3.12.8"})
+    assert paths.detect_python(run=run)[1] == (3, 12, 8)
+
+
+def test_macos_aseprite_dir_uses_application_support(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths.sys, "platform", "darwin")
+    monkeypatch.setattr(paths.pathlib, "Path", pathlib.Path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    folder = tmp_path / "Library" / "Application Support" / "Aseprite"
+    folder.mkdir(parents=True)
+    assert paths.detect_aseprite_dir() == folder
+
+
+def test_resolve_prefers_existing_venv_interpreter(tmp_path):
+    python = tmp_path / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    run = fake_run({str(python): f"{python}|3.12.8"})
+    got = paths.resolve({"root": str(tmp_path)}, run=run)
+    assert got.python == python
+    assert got.python_version == (3, 12, 8)

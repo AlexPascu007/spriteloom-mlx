@@ -2,8 +2,10 @@
 import asyncio
 import ctypes
 import json
+import os
 import pathlib
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -133,8 +135,69 @@ def clean_line(raw: str) -> str:
 
 
 def venv_python(root: pathlib.Path) -> pathlib.Path | None:
-    candidate = pathlib.Path(root) / ".venv" / "Scripts" / "python.exe"
-    return candidate if candidate.exists() else None
+    root = pathlib.Path(root)
+    # Check both layouts.  This keeps repository tests and manually copied
+    # environments useful when the launcher is run on another platform.
+    candidates = ((root / ".venv" / "bin" / "python"),
+                  (root / ".venv" / "Scripts" / "python.exe"))
+    if sys.platform == "win32":
+        candidates = (candidates[1], candidates[0])
+    return next((candidate for candidate in candidates if candidate.exists()),
+                None)
+
+
+def popen_options() -> dict:
+    """Process flags shared by the server and setup subprocesses.
+
+    Windows uses the existing no-console flag.  macOS gets a new session so
+    stop/cancel can signal the complete process group instead of only pip or
+    the server's immediate process.
+    """
+    options = {"creationflags": NO_WINDOW}
+    if sys.platform != "win32":
+        options["start_new_session"] = True
+    return options
+
+
+def terminate_process(proc: subprocess.Popen | None, timeout: float = 5) -> None:
+    """Stop a subprocess and its descendants without touching other jobs."""
+    if proc is None or proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        proc.terminate()
+    else:
+        # Every process created by popen_options() is its own group leader.
+        # Verify that property before signalling to avoid killing the
+        # launcher's group if a caller supplied a manually-created Popen.
+        try:
+            pgid = os.getpgid(proc.pid)
+        except OSError:
+            pgid = None
+        if pgid == proc.pid:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                proc.terminate()
+        else:
+            proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if sys.platform == "win32":
+            proc.kill()
+        else:
+            try:
+                pgid = os.getpgid(proc.pid)
+            except OSError:
+                pgid = None
+            if pgid == proc.pid:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
+            else:
+                proc.kill()
+        proc.wait(timeout=timeout)
 
 
 def port_is_free(port: int, host: str = HOST) -> bool:
@@ -193,7 +256,7 @@ class ServerProcess:
             [self.python, *self.args], cwd=str(self.root),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
-            creationflags=NO_WINDOW)
+            **popen_options())
         self.job = make_kill_on_close_job()
         assign_to_job(self.job, self.proc.pid)
         threading.Thread(target=self._pump, daemon=True).start()
@@ -250,12 +313,9 @@ class ServerProcess:
             return
         proc = self.proc
         assert proc
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-        # terminate() spares grandchildren; closing the job sweeps them up
+        terminate_process(proc)
+        # Windows terminate() spares grandchildren; closing the job sweeps
+        # them up.  On macOS/Linux terminate_process signals the process
+        # group directly.
         close_job(self.job)
         self.job = None

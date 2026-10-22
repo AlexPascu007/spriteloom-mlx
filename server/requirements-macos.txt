@@ -1,0 +1,11 @@
+# Apple silicon runtime. Keep this file separate from the Windows runtime.
+websockets>=12.0
+Pillow>=10.0
+numpy>=1.26
+scipy>=1.11
+safetensors>=0.4
+huggingface_hub>=0.24
+tqdm>=4.66
+mlx>=0.26.0
+mflux @ git+https://github.com/mflux-community/mflux.git@0fea52bada4ade619f1cdb7ae26087b32d87dd89
+pytest>=8.0
