@@ -1,4 +1,5 @@
 import sys
+import json
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,12 +85,22 @@ def _model_snapshot(tmp_path):
     (snapshot / "transformer").mkdir(parents=True)
     (snapshot / "vae").mkdir()
     (snapshot / "text_encoder").mkdir()
+    header = json.dumps({"tensor": {"dtype": "F32", "shape": [1],
+                                    "data_offsets": [0, 4]}}).encode()
+    for component in ("transformer", "vae", "text_encoder"):
+        (snapshot / component / "model.safetensors").write_bytes(
+            len(header).to_bytes(8, "little") + header + b"\0" * 4)
     return snapshot
+
+
+@pytest.fixture(autouse=True)
+def local_snapshot(tmp_path):
+    return _model_snapshot(tmp_path)
 
 
 def test_load_constructs_one_model_and_shares_components(monkeypatch, tmp_path):
     _install_fake_mflux(monkeypatch)
-    snapshot = _model_snapshot(tmp_path)
+    snapshot = next((tmp_path / "models--black-forest-labs--FLUX.2-klein-4B" / "snapshots").iterdir())
     pipe = MLXKleinPipeline(models_dir=str(tmp_path), quantize=8)
 
     assert pipe.load() is pipe
@@ -167,7 +178,21 @@ def test_progress_cancellation_propagates_and_cleans_callback(monkeypatch, tmp_p
     assert pipe._model.callbacks.in_loop == []
 
 
-def test_inpaint_is_explicitly_unimplemented(tmp_path):
-    pipe = MLXKleinPipeline(models_dir=str(tmp_path))
-    with pytest.raises(NotImplementedError, match="masked latent denoising"):
-        pipe.inpaint("add a hat", Image.new("RGBA", (8, 8)), Image.new("L", (8, 8)))
+def test_missing_model_is_an_explicit_setup_error(tmp_path):
+    pipe = MLXKleinPipeline(models_dir=str(tmp_path / "missing"))
+    with pytest.raises(RuntimeError, match="not downloaded"):
+        pipe._resolve_model_path()
+
+
+def test_partial_snapshot_and_missing_shard_are_rejected(tmp_path, local_snapshot):
+    # A component directory appears before its model download is finished.
+    (local_snapshot / "vae" / "model.safetensors").unlink()
+    with pytest.raises(RuntimeError, match="incomplete"):
+        MLXKleinPipeline(str(tmp_path))._resolve_model_path()
+
+
+def test_truncated_safetensor_is_rejected(tmp_path, local_snapshot):
+    file = local_snapshot / "transformer" / "model.safetensors"
+    file.write_bytes(file.read_bytes()[:-1])
+    with pytest.raises(RuntimeError, match="incomplete"):
+        MLXKleinPipeline(str(tmp_path))._resolve_model_path()

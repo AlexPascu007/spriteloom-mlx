@@ -252,10 +252,14 @@ class ServerProcess:
     def start(self) -> None:
         if self.is_alive():
             return
+        environment = os.environ.copy()
+        if sys.platform != "win32":
+            environment["SPRITELOOM_PARENT_PID"] = str(os.getpid())
         self.proc = subprocess.Popen(
             [self.python, *self.args], cwd=str(self.root),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
+            env=environment,
             **popen_options())
         self.job = make_kill_on_close_job()
         assign_to_job(self.job, self.proc.pid)

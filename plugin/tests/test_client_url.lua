@@ -38,7 +38,11 @@ eq(loadClient(tmp .. "/spriteloom_no_such_dir").URL,
 eq(loadClient(nil).URL, "http://127.0.0.1:8765", "no plugin dir")
 
 local dir = tmp .. "/spriteloom_port_test"
-os.execute('mkdir "' .. dir:gsub("/", "\\") .. '" 2>nul')
+if package.config:sub(1, 1) == "\\" then
+  os.execute('mkdir "' .. dir:gsub("/", "\\") .. '" 2>nul')
+else
+  os.execute("mkdir -p '" .. dir:gsub("'", "'\\''") .. "'")
+end
 
 -- a real port in the file wins
 local f = assert(io.open(dir .. "/server.json", "w"))

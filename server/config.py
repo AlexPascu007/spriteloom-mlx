@@ -2,6 +2,8 @@
 import json
 import os
 import pathlib
+import platform
+import sys
 
 DEFAULT_PORT = 8765
 HOST = "127.0.0.1"
@@ -10,11 +12,14 @@ VRAM_MODES = ("auto", "bf16", "offload")  # fp8 retired; a saved "fp8" -> auto
 DEFAULT_VRAM_MODE = "auto"
 
 SETTING_KEYS = ("port", "vram_mode", "root", "python", "aseprite_dir",
-                "models_dir")
+                "models_dir", "backend", "mlx_quantize")
 DEFAULT_MODELS_DIR = "models"
 
 
 def config_path() -> pathlib.Path:
+    if sys.platform == "darwin":
+        return (pathlib.Path.home() / "Library" / "Application Support"
+                / "Spriteloom" / "config.json")
     base = os.environ.get("APPDATA")
     root = pathlib.Path(base) if base else pathlib.Path.home()
     return root / "Spriteloom" / "config.json"
@@ -57,7 +62,29 @@ def load_settings(path: pathlib.Path | None = None) -> dict:
     out = {key: data.get(key) for key in SETTING_KEYS}
     out["port"] = load_port(target)
     out["vram_mode"] = load_vram_mode(target)
+    out["backend"] = load_backend(target)
+    out["mlx_quantize"] = load_mlx_quantize(target)
     return out
+
+
+def load_backend(path: pathlib.Path | None = None) -> str:
+    value = os.environ.get("SPRITELOOM_BACKEND") or _read(
+        path or config_path()).get("backend", "auto")
+    if value not in ("auto", "cuda", "mlx"):
+        raise ValueError("backend must be auto, cuda, or mlx")
+    if value == "auto":
+        return ("mlx" if sys.platform == "darwin" and
+                platform.machine().lower() in ("arm64", "aarch64") else "cuda")
+    return value
+
+
+def load_mlx_quantize(path: pathlib.Path | None = None) -> int | None:
+    value = _read(path or config_path()).get("mlx_quantize", 8)
+    if value is None:
+        return None
+    if type(value) is not int or value not in (3, 4, 5, 6, 8):
+        raise ValueError("mlx_quantize must be 3, 4, 5, 6, 8, or null")
+    return value
 
 
 def save_settings(values: dict, path: pathlib.Path | None = None) -> None:

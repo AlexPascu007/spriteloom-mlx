@@ -7,6 +7,7 @@ small interface as the Diffusers pipeline in ``server.instruct``.
 from __future__ import annotations
 
 import pathlib
+import json
 import random
 import tempfile
 from collections.abc import Mapping
@@ -17,7 +18,9 @@ from PIL import Image
 from server.instruct import (  # no MLX or torch import is needed for the server tests
     STYLE_SUFFIX,
     T2I_SUFFIX,
+    INPAINT_SUFFIX,
     KleinPipeline as _InputHelpers,
+    safetensors_expected_size,
     t2i_size,
 )
 
@@ -25,7 +28,7 @@ MODEL_ID = "black-forest-labs/FLUX.2-klein-4B"
 MODEL_FOLDER = "models--black-forest-labs--FLUX.2-klein-4B"
 # The adapter targets the API reviewed at this MFLUX revision.
 MFLUX_COMMIT = "0fea52bada4ade619f1cdb7ae26087b32d87dd89"
-MFLUX_STEPS = 4
+MFLUX_STEPS = 8  # keep SpriteLoom's tuned schedule on both backends
 GUIDANCE = 1.0
 
 
@@ -81,10 +84,25 @@ def _image_from_result(result: Any) -> Image.Image:
 
 
 def _component_directory(path: pathlib.Path) -> bool:
-    """Whether a path looks like an MFLUX or Diffusers model directory."""
+    """Check all component files before selecting a local model snapshot."""
     if not path.is_dir():
         return False
-    return any((path / name).is_dir() for name in ("vae", "transformer", "text_encoder"))
+    try:
+        for name in ("vae", "transformer", "text_encoder"):
+            component = path / name
+            files = list(component.glob("*.safetensors"))
+            if not files:
+                return False
+            for index in component.glob("*.safetensors.index.json"):
+                shards = set(json.loads(index.read_text())["weight_map"].values())
+                if not shards or any(not (component / shard).is_file() for shard in shards):
+                    return False
+            for file in files:
+                if not file.is_file() or file.stat().st_size < safetensors_expected_size(file):
+                    return False
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        return False
+    return True
 
 
 def _newest_directory(paths: list[pathlib.Path]) -> pathlib.Path | None:
@@ -150,7 +168,7 @@ class MLXKleinPipeline:
         """Find an existing local snapshot without invoking a downloader."""
         root = self.models_dir
         if not root.is_dir():
-            return root
+            raise RuntimeError("model is not downloaded or incomplete; run setup-macos.sh first")
 
         # SpriteLoom's setup uses a custom HF cache root.
         cache_model = root / MODEL_FOLDER
@@ -166,18 +184,24 @@ class MLXKleinPipeline:
         if _component_directory(root):
             return root
         children = [path for path in root.iterdir() if _component_directory(path)]
-        return _newest_directory(children) or root
+        found = _newest_directory(children)
+        if found is None:
+            raise RuntimeError("model is not downloaded or incomplete; run setup-macos.sh first")
+        return found
 
     def load(self):
         """Load one resident MFLUX model and a shared edit view."""
         if self._model is not None:
             return self
 
+        model_path = self._resolve_model_path()
+
         # Keep MLX/MFLUX imports lazy.  CUDA installations and unit tests that
         # only exercise protocol code must not import either framework.
         from mflux.models.flux2.variants import Flux2Klein, Flux2KleinEdit
 
-        model_path = self._resolve_model_path()
+        from server import models
+        models.set_load_progress(0.1, "Loading MLX weights", ceiling=0.95)
         model = Flux2Klein(model_path=str(model_path), quantize=self.quantize)
         edit_model = _SharedEditModel.create(Flux2KleinEdit, model)
         self._model_path = model_path
@@ -271,7 +295,28 @@ class MLXKleinPipeline:
         return images
 
     def inpaint(self, prompt, image, mask, variants=4, on_progress=None, seeds=None):
-        """Masked denoising is not yet available in the MFLUX adapter."""
-        raise NotImplementedError(
-            "MLX FLUX.2 Klein inpainting requires masked latent denoising and is not implemented yet"
-        )
+        """Lock unselected latents at each step and return a transparent layer."""
+        if variants <= 0:
+            return []
+        from server.mlx_inpaint import latent_mask, transparent_overlay
+        self.load()
+        prepared, content_size = _InputHelpers._prep_input(image)
+        prepared_mask = _InputHelpers._prep_mask(mask, prepared.size, content_size)
+        selected_seeds = self._seeds(seeds, variants)
+        images = []
+        with tempfile.TemporaryDirectory(prefix="spriteloom-mlx-inpaint-") as temp_dir:
+            reference_path = pathlib.Path(temp_dir) / "reference.png"
+            prepared.save(reference_path)
+            with latent_mask(self._edit_model, reference_path, prepared_mask):
+                for index in range(variants):
+                    result = self._run_one(
+                        self._edit_model, index, variants, on_progress,
+                        seed=selected_seeds[index],
+                        prompt=prompt + STYLE_SUFFIX + INPAINT_SUFFIX,
+                        num_inference_steps=MFLUX_STEPS,
+                        height=prepared.height, width=prepared.width,
+                        guidance=GUIDANCE, image_paths=[reference_path],
+                        scheduler="flow_match_euler_discrete")
+                    images.append(transparent_overlay(
+                        _image_from_result(result), prepared_mask, content_size))
+        return images

@@ -31,9 +31,9 @@ def main():
     from PIL import Image as PILImage
     progress = lambda v: print(f"\r{v:4.0%}", end="")
 
-    from server.instruct import KleinPipeline
+    from server.backend import create_pipeline
     t0 = time.time()
-    pipe = KleinPipeline()
+    pipe = create_pipeline()
     pipe.load()
     print(f"klein loaded in {time.time() - t0:.1f}s", flush=True)
     t0 = time.time()

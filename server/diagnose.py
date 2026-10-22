@@ -5,7 +5,7 @@ Run: .venv\\Scripts\\python -m server.diagnose
 import importlib.metadata as md
 import sys
 
-from server.config import load_models_dir
+from server.config import load_backend, load_models_dir
 from server.instruct import (memory_status, safetensors_expected_size,
                              snapshot_dir)
 
@@ -20,7 +20,9 @@ def gb(n: float) -> str:
 def show_versions() -> None:
     print("== versions ==")
     print(f"  python:       {sys.version.split()[0]}")
-    for name in PACKAGES:
+    packages = ("mlx", "mflux", "safetensors", "transformers") \
+        if load_backend() == "mlx" else PACKAGES
+    for name in packages:
         try:
             print(f"  {name + ':':13} {md.version(name)}")
         except md.PackageNotFoundError:
@@ -81,6 +83,18 @@ def load_transformer_alone(path) -> None:
 
 def main() -> None:
     show_versions()
+    if load_backend() == "mlx":
+        import mlx.core as mx
+        from server.backend import create_pipeline
+        print("== Apple GPU ==")
+        for name, value in mx.device_info().items():
+            print(f"  {name}: {value}")
+        pipeline = create_pipeline()
+        print("== MLX model load ==")
+        pipeline.load()
+        print(f"  loaded: {pipeline._model_path}")
+        print(f"  peak MLX memory: {gb(mx.get_peak_memory())}")
+        return
     show_memory()
     transformer = show_files()
     load_transformer_alone(transformer)

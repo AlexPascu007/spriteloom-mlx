@@ -69,7 +69,7 @@ a lightweight tool:
 
 | | Requirement |
 |---|---|
-| GPU | **NVIDIA, 12+ GB VRAM** on Windows, or **Apple silicon** with MLX on macOS (M1–M5; 32 GB is recommended) |
+| GPU | **NVIDIA, 12+ GB VRAM** on Windows, or **Apple silicon** with MLX on macOS (tested on M5 with 32 GB) |
 | RAM | **16 GB minimum on Windows.** Apple silicon users should have 32 GB for the original model before MLX quantization. |
 | OS | Windows or macOS on Apple silicon |
 | Python | 3.11+; macOS setup prefers Python 3.12 |
@@ -160,6 +160,8 @@ bundle contains the launcher, Cocoa webview, and UI only; `.venv`, `server/`,
 ad-hoc signature and is not a signed distribution build.
 
 ### macOS Apple silicon
+
+See [MACOS.md](MACOS.md) for the local test results, app paths, and current limits.
 
 The macOS path uses the regular Python launcher with a local `.venv`. It uses
 `uv` at `/opt/homebrew/bin/uv` when available and asks it for Python 3.12.

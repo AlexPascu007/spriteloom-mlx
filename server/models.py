@@ -8,6 +8,7 @@ thread, so swaps serialize with generation.
 import gc
 import logging
 import math
+import sys
 import time
 
 log = logging.getLogger("spriteloom.models")
@@ -67,14 +68,20 @@ def get(name, on_stage=None):
         if on_stage:
             on_stage(f"Unloading {_resident_name} model...")
         log.info("unloading %s", _resident_name)
+        _old_resident = _resident
         _resident = None
         _resident_name = None
+        release = getattr(_old_resident, "unload", None)
+        if release:
+            release()
+        del _old_resident
         gc.collect()
-        try:
-            import torch
+        torch = sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
-        except Exception:  # torch absent in unit tests
-            pass
+        mx = sys.modules.get("mlx.core")
+        if mx is not None:
+            mx.clear_cache()
     if on_stage:
         on_stage(f"Loading {name} model...")
     log.info("loading %s", name)

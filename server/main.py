@@ -3,9 +3,11 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import pathlib
 import sys
 import time
+import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 
@@ -125,10 +127,8 @@ def _history_msg(offset, limit, preview=False):
 def _register_default_models():
     """Idempotent registration of the real pipeline."""
     def klein():
-        from server import config
-        from server.instruct import KleinPipeline
-        p = KleinPipeline(models_dir=config.load_models_dir(),
-                          mode=config.load_vram_mode())
+        from server.backend import create_pipeline
+        p = create_pipeline()
         p.load()
         return p
 
@@ -305,9 +305,30 @@ async def serve(host="127.0.0.1", port=8765, stop=None, on_ready=None,
         await stop
 
 
+def _watch_launcher():
+    """Release the GPU even if the macOS launcher is force-quit."""
+    owner = os.environ.get("SPRITELOOM_PARENT_PID")
+    if os.name != "posix" or not owner:
+        return
+    try:
+        owner = int(owner)
+    except ValueError:
+        raise ValueError("SPRITELOOM_PARENT_PID must be a process ID") from None
+
+    def watch():
+        while os.getppid() == owner:
+            time.sleep(1)
+        # A model can be inside a native GPU call. A normal Python exit would
+        # wait for its worker thread. The OS releases GPU memory on exit.
+        os._exit(0)
+
+    threading.Thread(target=watch, name="launcher-watch", daemon=True).start()
+
+
 if __name__ == "__main__":
     from server.config import HOST, load_port
     logging.basicConfig(level=logging.INFO)
+    _watch_launcher()
     # The panel pings every 10s; websockets logs every open/close at INFO.
     logging.getLogger("websockets").setLevel(logging.WARNING)
     # Benign on Windows: torch.distributed cannot redirect stdio; warns once
