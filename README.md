@@ -1,348 +1,84 @@
-# Spriteloom
+# spriteloom-mlx
 
-**Local AI pixel-art assistant for [Aseprite](https://www.aseprite.org/).**
-Generate sprites from a text prompt, edit existing sprites with an
-instruction, or redraw a selected region — all running on your own GPU.
-No cloud, no subscription, your pixels never leave your machine.
+Local pixel-art generation and editing on Apple Silicon, using MLX and
+FLUX.2 Klein 4B. Run it as a headless engine for
+[spriteloom-mcp](https://github.com/AlexPascu007/spriteloom-mcp), or use the
+optional Aseprite extension.
 
-**[Sample output and how it works → vkarach.github.io/spriteloom](https://vkarach.github.io/spriteloom/)**
+**Based on [SpriteLoom](https://github.com/vkarach/spriteloom), created by
+Valentyn Karachevtsev (vkarach).** This independent port keeps the original
+Apache 2.0 license and Git history. The original author built the application,
+pixel-art workflow, prompts, protocol, image processing, and Aseprite extension.
+This repository adds an MLX backend, masked latent processing, macOS setup,
+and a shared headless service. See [NOTICE](NOTICE).
 
-<table align="center">
-<tr>
-<td rowspan="2" align="center" valign="middle">
-  <img src="assets/preview/generate.gif" width="522" alt="Generate">
-</td>
-<td align="center" valign="middle">
-  <img src="assets/preview/edit_with_ai.gif" width="243" alt="Edit with AI">
-</td>
-</tr>
-<tr>
-<td align="center" valign="middle">
-  <img src="assets/preview/inpaint.gif" width="243" alt="Inpaint">
-</td>
-</tr>
-</table>
-<p align="center"><em>Generate &middot; Edit with AI &middot; Inpaint</em></p>
+## What it does
 
-<p align="center">
-  <img src="assets/preview/rotate_front.gif" width="380" alt="Rotate, front view">
-  <img src="assets/preview/rotate_back.gif" width="380" alt="Rotate, back view">
-  <br><em>Rotate / Instruct, two different turnarounds</em>
-</p>
-<p align="center"><em>All clips sped up for the demo.</em></p>
+- Generate sprites from text.
+- Edit an existing sprite by instruction.
+- Redraw a masked region while preserving source latents outside it.
+- Generate another view of a subject.
+- Reduce model output to a pixel-art canvas and palette.
 
-<p align="center">
-  <img src="assets/gallery/tall-man.png" width="94" alt="tall man in a dark coat">
-  <img src="assets/gallery/adventurer.png" width="160" alt="adventurer in a red coat">
-  <img src="assets/gallery/explorer.png" width="160" alt="weathered explorer">
-  <br>
-  <img src="assets/gallery/cottage.png" width="160" alt="wooden cottage">
-  <img src="assets/gallery/lantern.png" width="160" alt="iron lantern">
-  <img src="assets/gallery/gold-coin.png" width="160" alt="gold coin">
-</p>
-<p align="center"><em>Real output, one generation each. Subjects like "tall man
-in a dark coat", "weathered explorer in a red leather coat", "wooden cottage,
-thatched roof". Scaled up with hard pixel edges for display.</em></p>
+The generation and editing paths share one resident model. Inference runs
+locally. Setup downloads the model weights; generation does not use a cloud
+image API.
 
-## What it is
+## Quick start
 
-A WebSocket server that runs a diffusion model locally, plus an Aseprite
-extension that talks to it. You stay in Aseprite the whole time; results
-open in a side window and drop in as new layers on click. It never edits
-your existing pixels.
-
-Four tasks, one panel:
-
-- **Generate** — a sprite from a text prompt.
-- **Edit with AI** — change an existing sprite by instruction ("make the
-  sword glow blue"); style and everything unmentioned stays put.
-- **Inpaint Selection** — same, but only ever touches the selected region.
-- **Rotate + Instruct** — re-view the same subject from another angle.
-
-Everything runs on a single model (FLUX.2 Klein), so there are no model
-swaps: after the first load, tasks respond in seconds.
-
-## Hardware you need — read this first
-
-This runs a 4B-parameter diffusion model on your own machine. It is **not**
-a lightweight tool:
-
-| | Requirement |
-|---|---|
-| GPU | **NVIDIA, 12+ GB VRAM** on Windows, or **Apple silicon** with MLX on macOS (tested on M5 with 32 GB) |
-| RAM | **16 GB minimum on Windows.** Apple silicon users should have 32 GB for the original model before MLX quantization. |
-| OS | Windows or macOS on Apple silicon |
-| Python | 3.11+; macOS setup prefers Python 3.12 |
-| Aseprite | 1.3+ |
-| Disk | ~15 GB for the model (downloaded during Setup) |
-
-There is no CPU fallback and no cloud option by design. On macOS, the server
-selects MLX on arm64 and uses 8-bit quantization by default. On Windows, it
-selects the CUDA backend.
-
-### VRAM modes
-
-Setup's **VRAM mode** dropdown picks how the ~8 GB transformer is fit onto
-the GPU:
-
-- **Auto** (default) — detects free VRAM and picks bf16 on 12+ GB cards,
-  Legacy 8 GB mode below that.
-- **bf16** — the whole model stays resident on the GPU. Fastest; needs 12+ GB
-  free VRAM.
-- **Legacy 8 GB mode** — for 8 GB cards (e.g. a laptop RTX 4060). The model
-  doesn't fit on the GPU all at once, so it moves one layer onto the GPU
-  right before that layer runs, then swaps it back out to system RAM. VRAM
-  usage stays low the whole time (one layer resident, not the whole model),
-  and so does GPU utilization: most of the time goes to shuttling weights
-  over PCIe, not to compute, and that is the actual reason this is slow.
-  Output is identical to bf16, just much slower. There is no faster 8 GB
-  path currently. An fp8-quantized mode was tried and measured no better
-  than this, while adding a real quality risk, so it was dropped.
-
-  Legacy 8 GB mode keeps the whole ~16 GB model in **system RAM** (that is
-  where layers are swapped from). On a 16 GB machine that only fits with a
-  generous Windows page file, so leave it enabled and sized (or set it to
-  system-managed). If free RAM plus page file cannot cover the model the load
-  fails; the server now checks this at startup and prints why instead of
-  crashing.
-
-On Apple silicon, the launcher hides the Windows VRAM choices. The MLX
-backend uses 8-bit quantization by default and loads the original BFL model
-files from the downloaded diffusers layout.
-
-## Install
-
-### Windows
-
-1. Download the latest build from
-   [itch.io](https://vkarach.itch.io/spriteloom) and unzip it anywhere. It
-   has `Spriteloom.exe`, `server/`, and `plugin/` together; nothing else to
-   fetch first.
-2. Windows will likely show a "Windows protected your PC" SmartScreen
-   warning — `Spriteloom.exe` isn't code-signed, so it has no reputation
-   yet. Click **More info**, then **Run anyway**.
-3. Press **Setup**. It shows what is missing: the environment, PyTorch,
-   the dependencies, the plugin, the model (~15 GB), a Start Menu shortcut.
-4. Tick everything and press **Install selected**. It builds the `.venv`,
-   installs the packages and the plugin, downloads the model, adds a Start
-   Menu shortcut, and prints a live log. Restart Aseprite once the plugin
-   is in.
-
-**Start** stays disabled until every required piece — including the model —
-is in place; there is no lazy first-run download.
-
-<p align="center">
-  <img src="assets/preview/setup.gif" width="400" alt="Setup running">
-  <br><em>Setup in action, sped up.</em>
-</p>
-
-If you would rather do it by hand:
-
-1. `py -3 -m venv .venv`
-2. `.venv\Scripts\python -m pip install -r server\requirements.txt`
-3. `.venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cu128`
-4. `install-plugin.bat`, then restart Aseprite.
-
-With the `.venv` set up this way, `start-server.bat` starts the server in a
-console window instead of through the launcher.
-
-To build the exe yourself from a full clone of this repository:
-`.venv\Scripts\python -m pip install -r launcher\requirements.txt`, then
-`.venv\Scripts\python -m PyInstaller build.spec --distpath .` -- it builds
-straight into the project root as `Spriteloom.exe`, about 15 MB: the model
-and PyTorch stay outside it.
-
-On Apple silicon, install PyInstaller in the macOS environment with
-`uv pip install --python .venv/bin/python pyinstaller`, then run
-`./build-macos.sh`. It writes `Spriteloom.app` into the project root. The
-bundle contains the launcher, Cocoa webview, and UI only; `.venv`, `server/`,
-`plugin/`, and `models/` stay beside it. The local build uses PyInstaller's
-ad-hoc signature and is not a signed distribution build.
-
-### macOS Apple silicon
-
-See [MACOS.md](MACOS.md) for the local test results, app paths, and current limits.
-
-The macOS path uses the regular Python launcher with a local `.venv`. It uses
-`uv` at `/opt/homebrew/bin/uv` when available and asks it for Python 3.12.
-Without `uv`, install Python 3.12 and let the script find `python3.12`.
-
-From the project folder, run:
+Requires Apple Silicon, Python 3.12 or [uv](https://docs.astral.sh/uv/), and
+about 16 GB of free disk space for the original weights. The tested machine
+has an Apple M5 and 32 GB of unified memory. Other configurations need tests.
 
 ```sh
-chmod +x setup-macos.sh start-server.sh install-plugin.sh
-./setup-macos.sh
+git clone https://github.com/AlexPascu007/spriteloom-mlx.git
+cd spriteloom-mlx
+./setup-mlx.sh
+./start-server.sh
 ```
 
-The script installs the launcher, MLX, the pinned MFLUX commit
-(`0fea52bada4ade619f1cdb7ae26087b32d87dd89`), and the other server packages.
-It downloads the original
-`black-forest-labs/FLUX.2-klein-4B` snapshot, ignores the standalone
-checkpoint file, and writes `models/models--black-forest-labs--FLUX.2-klein-4B/.complete`
-only after the download finishes. It does not select another model.
+The engine listens on `127.0.0.1:8765`. Aseprite and a graphical launcher
+are optional. For an agent workflow, install the separate
+[MCP server and skill](https://github.com/AlexPascu007/spriteloom-mcp).
 
-Run the launcher with:
+## Tested behavior
 
-```sh
-.venv/bin/python -m launcher.app
-```
+On the test machine, one 64×64 sprite took about 17–21 seconds, using a
+512-pixel working image, eight steps, and 8-bit MLX weights. Peak MLX
+allocation across all four operations was 12.3 GB. This is a small local test,
+rather than a hardware benchmark. [MACOS.md](MACOS.md) has the test details.
 
-`start-server.sh` starts the server directly for diagnostics. The plugin is
-installed under `~/Library/Application Support/Aseprite/extensions/spriteloom`;
-restart Aseprite after setup. macOS has no Start Menu shortcut step.
+The MLX masked path restores the source/noise mixture outside the mask after
+each denoising step. The native protocol returns a transparent patch with
+the upstream two-pixel selection margin. The MCP layer clips that patch to
+the exact input mask and can return a complete edited sprite.
 
-## Use
-
-1. Run `Spriteloom.exe`, press **START** and leave the window open. The dot
-   turns green once the model is resident, about 25 seconds after a warm
-   start. Closing the window stops the server.
-2. In Aseprite: **Sprite → Spriteloom...** (or press **F1**). Pick a task,
-   fill the fields, press **Run**. Results open in a separate window; click
-   a variant to insert it as a new layer.
-3. **Generate** understands full sentences: pick a **View** preset, name the
-   **Subject** ("closed book with dark brown leather cover"), add **Extra**
-   details if needed — the panel shows the exact text it will send.
-4. **Edit / Inpaint** take instructions, not a strength slider: say what to
-   change and how much. Inpaint only touches the selection.
-5. **Rotate / Instruct**: name the subject explicitly ("four-legged brown
-   horse", not "character"). Optional **Mirror symmetry** forces the result
-   left/right symmetric, which can help a front/back view hold together -
-   but it mirrors everything, including a one-handed weapon or an
-   asymmetric pose, so it can also make those look wrong. Try it, don't
-   assume it's always the better result.
-6. **Advanced...** opens a separate window with Background, Palette, Seed, and
-   Extra (appended to the prompt for Generate and Rotate/Instruct; Edit and
-   Inpaint ignore it).
-7. **Background**: Auto detects and strips a uniform background, Remove
-   strips the dominant border color, Keep leaves it fully opaque.
-8. **Palette**: Auto derives colors per result; Current palette pins output to
-   the open sprite's whole palette; Selected colors pins to only the swatches
-   highlighted in the palette bar; Palette file pins to a `.gpl`/`.pal`/`.png`
-   file so a batch of sprites shares one set of colors.
-9. **History** browses past generations (stored in `output/`), newest first;
-   click a run to see its variants, click a variant to insert it.
-
-## How it works
-
-```
-+-----------------------+                     +---------------+       +--------------------+
-| Aseprite plugin (Lua) |  <-- WebSocket -->  | Python server |  -->  | FLUX.2 Klein (GPU) |
-|   dialogs, results,   |                     |   protocol,   |       |  single resident   |
-| history, layer insert |                     |  postprocess  |       |  model, no swaps   |
-+-----------------------+                     +---------------+       +--------------------+
-```
-
-- **One model, one warm-up.** Every task hits the same FLUX.2 Klein pipeline,
-  so there is no per-task load/unload. On 12+ GB cards it stays fully
-  resident; on 8 GB cards (Legacy 8 GB mode) each layer streams to the GPU
-  per task instead, which is where that mode's extra time goes.
-- **WebSocket protocol** with request validation at the boundary and
-  streamed progress messages back to the plugin (`server/protocol.py`,
-  `server/main.py`).
-- **Postprocess pipeline** turns raw diffusion output into a clean sprite:
-  crop to subject, palette quantization, background removal, mirror
-  symmetry, fit-into-canvas (`server/postprocess.py`).
-- **The plugin is modular Lua** with pure, unit-tested prompt assembly and a
-  UI layer tested against a stubbed Aseprite API — see below.
-
-### Quantization note
-
-8-bit quantizing the Klein *transformer* produces pure noise in
-text-to-image (edits work fine). The shipped setup sidesteps this: 8-bit
-text encoder + bf16 transformer, fully resident. See [TODO.md](TODO.md).
+Angle instructions and artistic quality depend on the model. MLX and CUDA
+can produce different images from the same seed. Palette preservation is on
+by default; API clients can disable it when a request needs new colors.
 
 ## Development
 
-**Server tests:**
-
-```
-.venv\Scripts\python -m pytest server/tests/ --ignore=server/tests/smoke.py
-```
-
-**Prompt tuning without Aseprite** (writes raw + postprocessed variants to `output/`):
-
-```
-.venv\Scripts\python -m server.tests.smoke "demonic sword" --size 64
-```
-
-**Plugin tests** (needs `scoop install lua luacheck`, user-scoped):
-
-```
-luacheck plugin\*.lua plugin\tests\*.lua
-lua plugin\tests\test_prompt.lua
-lua plugin\tests\test_panel.lua
-```
-
-`luacheck` bundles Lua 5.4 (the version Aseprite runs); `.luacheckrc`
-declares the API globals it injects. `test_panel.lua` loads every module
-against a stubbed Aseprite API and repaints the status canvas in each server
-state — this catches broken cross-module calls without launching the editor.
-Layout and ghosting still need a real Aseprite.
-
-### Plugin layout
-
-| file | holds |
-|---|---|
-| `main.lua` | entry point, registers the menu command |
-| `dialogs.lua` | the control panel |
-| `results.lua` | results window (fresh variants) |
-| `history.lua` | history list and single-run windows |
-| `ui.lua` | theme colors, checkerboard, variant grid, prompt preview |
-| `sprite.lua` | frame/mask export, inserting variants as layers |
-| `prompt.lua` | prompt assembly and key maps (pure Lua, unit-tested) |
-| `client.lua` | WebSocket client |
-| `base64.lua` | base64 codec |
-
-### Launcher layout
-
-| file | holds |
-|---|---|
-| `launcher/app.py` | the window, the JS bridge, window sizing |
-| `launcher/ui/index.html` | markup and styles, main and setup screens |
-| `launcher/server_proc.py` | the server subprocess, port probing, health |
-| `launcher/plugin_install.py` | copying the plugin, version comparison |
-| `launcher/paths.py` | finding the root, Python, Aseprite and the model |
-| `launcher/setup_checks.py` | what the setup is missing, detection only |
-| `launcher/setup_steps.py` | running the install steps in order |
-| `server/config.py` | the settings, shared by the launcher and the server |
-| `setup-macos.sh` | creates the macOS environment and downloads the model |
-| `start-server.sh` | starts the macOS server from `.venv/bin/python` |
-| `install-plugin.sh` | installs the plugin into the macOS Aseprite folder |
-| `build-macos.spec`, `build-macos.sh` | builds the local arm64 `.app` bundle |
-
-The launcher owns the settings file `%APPDATA%\Spriteloom\config.json` on
-Windows and `~/Library/Application Support/Spriteloom/config.json` on macOS.
-The port, backend settings, and setup paths live there, and every write merges
-so one key never erases another. The port defaults to 8765, and **Install**
-stamps it into `server.json` next to the plugin, so both ends agree.
-
-On Windows, the server runs inside a job object that dies with the launcher.
-On macOS, the launcher starts a separate process group and stops the group on
-window close or setup cancellation. This keeps a normal launcher quit from
-leaving a server behind holding memory.
-
-## Troubleshooting
-
-If the server says it crashed or never finishes loading, run the built-in
-loader check from the install folder:
-
-```text
-# Windows
-.venv\Scripts\python -m server.diagnose
-
-# macOS
+```sh
+.venv/bin/python -m pytest server/tests launcher/tests
+.venv/bin/python -m server.macos_check
 .venv/bin/python -m server.diagnose
 ```
 
-It prints package versions, memory headroom, and whether the model files are
-complete, then loads the transformer on its own. `TRUNCATED` means the
-download was cut short — delete the model folder and re-download via Setup. A
-crash only in the full run, with the isolated load passing, is memory: close
-other apps. On Windows, also raise the page file. The server runs the same
-file and memory checks at startup, so this is mainly for a closer look.
+MFLUX is pinned at `0fea52bada4ade619f1cdb7ae26087b32d87dd89`. The model setup
+uses BFL snapshot `e7b7dc27f91deacad38e78976d1f2b499d76a294`.
+Model files, virtual environments, and generated outputs are excluded from Git.
 
-## License
+[ASEPRITE.md](ASEPRITE.md) describes the optional extension and legacy Windows
+workflow. Windows/CUDA code is retained from upstream; the new local tests
+used MLX on macOS.
 
-[Apache 2.0](LICENSE). The model, FLUX.2 Klein 4B, is licensed separately by
-Black Forest Labs under Apache 2.0 and downloaded at runtime, not redistributed
-here.
+## License and credits
+
+- Original SpriteLoom: Valentyn Karachevtsev, [Apache 2.0](LICENSE).
+- MLX model implementation: [MFLUX](https://github.com/mflux-community/mflux), MIT.
+- Model: [FLUX.2 Klein 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B),
+  Black Forest Labs, Apache 2.0. Weights are downloaded separately.
+
+This is an independent port, with no claimed endorsement from the original
+author or model providers.

@@ -1,6 +1,7 @@
 """Spriteloom server: WebSocket endpoint on localhost."""
 import asyncio
 import functools
+import hmac
 import json
 import logging
 import os
@@ -164,7 +165,7 @@ def _run(req, on_progress, on_stage):
     # strip background at full res BEFORE shrinking: after the palette snap
     # the flood ate subject pixels that snapped near background colors
     pal = req.palette or (
-        sprite_palette(palette_src) if palette_src is not None else None)
+        sprite_palette(palette_src) if palette_src is not None and req.preserve_palette else None)
     out = []
     on_stage(f"Post-processing 0/{len(raw)}")
     for img in raw:
@@ -191,7 +192,7 @@ class JobCancelled(Exception):
     """Client disconnected mid-generation; abort the GPU job."""
 
 
-async def handle_request(ws, req):
+async def handle_request(ws, req, state=None):
     loop = asyncio.get_running_loop()
 
     def send(msg):
@@ -212,34 +213,63 @@ async def handle_request(ws, req):
     def on_stage(text):
         send(progress_msg(req.id, 0.0, stage=text))
 
-    images, seeds = await loop.run_in_executor(
-        _gpu_executor, functools.partial(_run, req, on_progress, on_stage))
-    await ws.send(result_msg(req.id, images, seeds))
-
-
-async def _handler(ws):
+    if state:
+        state.active += 1
     try:
-        await _serve_connection(ws)
+        images, seeds = await loop.run_in_executor(
+            _gpu_executor, functools.partial(_run, req, on_progress, on_stage))
+        await ws.send(result_msg(req.id, images, seeds))
+    finally:
+        if state:
+            state.active -= 1
+            state.last_activity = time.monotonic()
+
+
+async def _handler(ws, state=None):
+    try:
+        await _serve_connection(ws, state)
     except websockets.exceptions.ConnectionClosed:
         # the plugin opens a fresh socket per ping/request and drops it without
         # a close handshake; that is normal, not a handler failure to log
         log.debug("client closed connection without a close frame")
 
 
-async def _serve_connection(ws):
+async def _serve_connection(ws, state=None):
     async for message in ws:
         try:
             data = json.loads(message)
             if isinstance(data, dict) and data.get("type") == "ping":
                 # the panel shows a load bar until Klein is resident
                 model = "ready" if models.is_ready("klein") else "loading"
-                pong = {"type": "pong", "model": model}
+                from server.config import load_backend
+                pong = {"type": "pong", "model": model, "server": "spriteloom",
+                        "protocol": 1, "pid": os.getpid(), "backend": load_backend(),
+                        "managed": bool(state and state.token),
+                        "busy": state.active if state else 0,
+                        "capabilities": {"palette_control": True, "masked_inpaint": True}}
+                from server.config import load_mlx_quantize
+                pong["settings"] = {"model_id": "black-forest-labs/FLUX.2-klein-4B",
+                                    "steps": 8, "working_max_side": 512,
+                                    "quantize": load_mlx_quantize() if load_backend() == "mlx" else None}
                 if model == "loading":
                     prog = models.load_progress()
                     pong["progress"] = round(prog[0], 3) if prog else 0.0
                     if prog and prog[1]:
                         pong["stage"] = prog[1]
                 await ws.send(json.dumps(pong))
+                continue
+            if isinstance(data, dict) and data.get("type") == "shutdown":
+                token = data.get("token")
+                if (not state or not state.token or not isinstance(token, str)
+                        or not hmac.compare_digest(state.token, token)):
+                    await ws.send(error_msg("", "service shutdown is not authorized"))
+                elif state.active:
+                    await ws.send(error_msg("", "service is busy; wait for its requests to finish"))
+                else:
+                    await ws.send(json.dumps({"type": "shutdown", "stopped": True}))
+                    if not state.stop.done():
+                        state.stop.set_result(None)
+                    return
                 continue
             if isinstance(data, dict) and data.get("type") == "history":
                 await ws.send(_history_msg(int(data.get("offset", 0)),
@@ -254,7 +284,7 @@ async def _serve_connection(ws):
             await ws.send(error_msg("", str(e)))
             continue
         try:
-            await handle_request(ws, req)
+            await handle_request(ws, req, state)
         except JobCancelled:
             log.info("request %s cancelled by client", req.id)
             break  # socket is already closed; stop serving this connection
@@ -290,6 +320,7 @@ async def serve(host="127.0.0.1", port=8765, stop=None, on_ready=None,
     loop = asyncio.get_running_loop()
     if stop is None:
         stop = loop.create_future()
+    state = _ServiceState(stop)
     if preload:
         # a failed load needs the user to act; exit rather than hang on 'loading'
         def on_fatal():
@@ -297,12 +328,34 @@ async def serve(host="127.0.0.1", port=8765, stop=None, on_ready=None,
                 lambda: stop.done() or stop.set_result(None))
         _preload_klein(on_fatal)
     # no keepalive: the 20s ping timeout killed sockets mid-job
-    async with websockets.serve(_handler, host, port, max_size=64 * 2**20,
-                                ping_interval=None):
-        log.info("Spriteloom server on ws://%s:%s", host, port)
-        if on_ready:
-            on_ready()
-        await stop
+    monitor = asyncio.create_task(state.watch_idle()) if state.token and state.idle > 0 else None
+    try:
+        async with websockets.serve(functools.partial(_handler, state=state), host, port,
+                                    max_size=64 * 2**20, ping_interval=None):
+            log.info("Spriteloom server on ws://%s:%s", host, port)
+            if on_ready:
+                on_ready()
+            await stop
+    finally:
+        if monitor:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
+
+
+class _ServiceState:
+    def __init__(self, stop):
+        self.stop = stop
+        self.token = os.environ.get("SPRITELOOM_SERVICE_TOKEN", "")
+        self.idle = float(os.environ.get("SPRITELOOM_IDLE_SECONDS", "600")) if self.token else 0
+        self.active = 0
+        self.last_activity = time.monotonic()
+
+    async def watch_idle(self):
+        while not self.stop.done():
+            await asyncio.sleep(min(1, self.idle))
+            if not self.active and time.monotonic() - self.last_activity >= self.idle:
+                log.info("idle model service stopped")
+                self.stop.set_result(None)
 
 
 def _watch_launcher():
@@ -339,6 +392,7 @@ if __name__ == "__main__":
     # bitsandbytes casts to fp16 for 8-bit matmul on purpose; not a bug
     warnings.filterwarnings("ignore", message="MatMul8bitLt")
     try:
-        asyncio.run(serve(host=HOST, port=load_port(), preload=True))
+        port = int(os.environ.get("SPRITELOOM_PORT", load_port()))
+        asyncio.run(serve(host=HOST, port=port, preload=True))
     except KeyboardInterrupt:
         log.info("Spriteloom server stopped. Bye.")

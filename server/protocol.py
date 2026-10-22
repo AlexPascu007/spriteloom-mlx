@@ -34,6 +34,7 @@ class Request:
     seed: int | None = None  # None = roll a fresh one per variant
     palette: list[tuple[int, int, int]] | None = None  # None = auto palette
     frames: list[Frame] = field(default_factory=list)
+    preserve_palette: bool = True
 
 
 def image_to_b64(img: Image.Image) -> str:
@@ -145,6 +146,7 @@ def parse_request(text: str) -> Request:
         seed=seed,
         palette=_parse_palette(data.get("palette")),
         frames=frames,
+        preserve_palette=bool(data.get("preserve_palette", True)),
     )
 
 

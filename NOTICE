@@ -1,0 +1,16 @@
+spriteloom-mlx
+
+Based on SpriteLoom, created by Valentyn Karachevtsev (vkarach).
+Original project: https://github.com/vkarach/spriteloom
+Original license: Apache License 2.0 (retained in LICENSE).
+
+The original project provides the application, prompts, pixel-art processing,
+WebSocket protocol, and Aseprite extension. This independent repository adds
+MLX inference, masked denoising, macOS integration, and a shared local service.
+The retained source history identifies the upstream code and later changes.
+
+MFLUX provides the MLX FLUX.2 implementation under its MIT license.
+Black Forest Labs supplies FLUX.2 Klein 4B weights under Apache License 2.0.
+Model weights are downloaded at setup time and are not included here.
+
+No endorsement by the original creator or model providers is claimed.
