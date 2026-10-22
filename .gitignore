@@ -31,3 +31,7 @@ Spriteloom/
 
 # disposable preview, regenerated from launcher/ui/index.html
 launcher/ui/preview.html
+
+# Local runtime paths can also be symbolic links.
+.venv
+models
